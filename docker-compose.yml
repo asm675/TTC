@@ -1,0 +1,73 @@
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.5
+    command:
+      - redpanda
+      - start
+      - --overprovisioned
+      - --smp=1
+      - --memory=1G
+      - --reserve-memory=0M
+      - --node-id=0
+      - --check=false
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092,PLAINTEXT_HOST://0.0.0.0:19092
+      - --advertise-kafka-addr=PLAINTEXT://redpanda:9092,PLAINTEXT_HOST://localhost:19092
+    ports:
+      - "9092:9092" # containers -> redpanda:9092
+      - "19092:19092" # host -> localhost:19092
+      - "9644:9644" # admin API
+
+  mongo:
+    image: mongo:7
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+
+  spark:
+    image: bitnami/spark:3.5
+    user: root
+    working_dir: /app
+    volumes:
+      - ./:/app
+      - ./chk:/chk
+    depends_on:
+      - redpanda
+    environment:
+      - BROKER=redpanda:9092
+      - MONGODB_URI=${MONGODB_URI}
+      - MONGO_DB=transit_project
+      - RAW_COLL=ttc_raw_snapshots
+      - DER_COLL=departures
+      - CHK_DIR=/chk
+      - PYSPARK_PYTHON=/usr/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/usr/bin/python3
+      - HOME=/tmp
+      - JAVA_TOOL_OPTIONS=-Duser.home=/tmp -Duser.name=spark
+    command:
+      - bash
+      - -c
+      - |
+        echo "Installing Python and dependencies..."
+        apt-get update -y && \
+        apt-get install -y python3 python3-pip && \
+        pip3 install --no-cache-dir 'pymongo[srv]' && \
+        echo "Starting Spark streaming job..." && \
+        /opt/bitnami/spark/bin/spark-submit \
+          --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.1,org.mongodb.spark:mongo-spark-connector_2.12:10.3.0 \
+          --conf spark.mongodb.write.connection.uri="${MONGODB_URI}" \
+          --conf spark.mongodb.write.database=transit_project \
+          --conf spark.mongodb.write.collection=departures \
+          /app/spark_ttc_stream.py
+
+  api:
+    build: ./api
+    environment:
+      MONGODB_URI_READONLY: "${MONGODB_URI}"
+      MONGO_DB: "transit_project"
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+    ports: ["8000:8000"]
+    restart: unless-stopped
+
+volumes:
+  mongo_data:
